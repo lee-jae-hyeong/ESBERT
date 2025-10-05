@@ -21,13 +21,13 @@ class Trainer:
 
             for batch in train_loop:
                 texts = batch['text']
-                labels = batch['label']
+                group_ids = batch['group_id']
 
                 embeddings = self.model.encode(
                     texts, convert_to_tensor=True, device=self.args.device
                 )
 
-                loss = self.loss_fn(embeddings, labels.to(self.args.device))
+                loss = self.loss_fn(embeddings, group_ids.to(self.args.device))
 
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -49,13 +49,13 @@ class Trainer:
             with torch.no_grad():
                 for batch in val_loop:
                     texts = batch['text']
-                    labels = batch['label']
+                    group_ids = batch['group_id']
 
                     embeddings = self.model.encode(
                         texts, convert_to_tensor=True, device=self.args.device
                     )
 
-                    loss = self.loss_fn(embeddings, labels.to(self.args.device))
+                    loss = self.loss_fn(embeddings, group_ids.to(self.args.device))
                     total_val_loss += loss.item()
                     val_loop.set_postfix(loss=loss.item())
 
@@ -64,4 +64,3 @@ class Trainer:
 
         # 모델 저장
         self.model.save(self.args.save_dir)
-

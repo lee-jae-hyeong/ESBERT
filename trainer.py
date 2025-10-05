@@ -1,37 +1,67 @@
 import torch
 from tqdm import tqdm
-from loss import info_nce_loss
+from loss import MultiPositiveInfoNCE
 
 class Trainer:
-    def __init__(self, model, train_loader, optimizer, args):
+    def __init__(self, model, train_loader, val_loader, optimizer, args):
         self.model = model
         self.train_loader = train_loader
+        self.val_loader = val_loader
         self.optimizer = optimizer
         self.args = args
+        self.loss_fn = MultiPositiveInfoNCE(temperature=self.args.temperature)
 
     def train(self):
         self.model.to(self.args.device)
-        self.model.train()
-
+        
         for epoch in range(self.args.epochs):
-            total_loss = 0
-            loop = tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.args.epochs}")
+            self.model.train()
+            total_train_loss = 0
+            train_loop = tqdm(self.train_loader, desc=f"[Train] Epoch {epoch+1}/{self.args.epochs}")
 
-            for batch in loop:
-                text1, text2 = batch['text1'], batch['text2']
-                emb1 = self.model.encode(text1, convert_to_tensor=True, device=self.args.device)
-                emb2 = self.model.encode(text2, convert_to_tensor=True, device=self.args.device)
+            for batch in train_loop:
+                texts = batch['text']
+                group_ids = batch['group_id']
 
-                loss = info_nce_loss(emb1, emb2, self.args.temperature)
+                embeddings = self.model.encode(
+                    texts, convert_to_tensor=True, device=self.args.device
+                )
+
+                loss = self.loss_fn(embeddings, group_ids.to(self.args.device))
 
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
 
-                total_loss += loss.item()
-                loop.set_postfix(loss=loss.item())
+                total_train_loss += loss.item()
+                train_loop.set_postfix(loss=loss.item())
 
-            avg_loss = total_loss / len(self.train_loader)
-            print(f"Epoch {epoch+1} | Avg Loss: {avg_loss:.4f}")
+            avg_train_loss = total_train_loss / len(self.train_loader)
+            print(f"Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f}")
 
+            # ----------------------------
+            # Validation
+            # ----------------------------
+            self.model.eval()
+            total_val_loss = 0
+            val_loop = tqdm(self.val_loader, desc=f"[Val] Epoch {epoch+1}/{self.args.epochs}")
+
+            with torch.no_grad():
+                for batch in val_loop:
+                    texts = batch['text']
+                    group_ids = batch['group_id']
+
+                    embeddings = self.model.encode(
+                        texts, convert_to_tensor=True, device=self.args.device
+                    )
+
+                    loss = self.loss_fn(embeddings, group_ids.to(self.args.device))
+                    total_val_loss += loss.item()
+                    val_loop.set_postfix(loss=loss.item())
+
+            avg_val_loss = total_val_loss / len(self.val_loader)
+            print(f"Epoch {epoch+1} | Validation Loss: {avg_val_loss:.4f}")
+
+        # 모델 저장
         self.model.save(self.args.save_dir)
+

@@ -2,80 +2,49 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ----------------------------
-# 기존 1:1 InfoNCE
-# ----------------------------
-def info_nce_loss(embeddings_a, embeddings_b, temperature=0.07):
-    embeddings_a = F.normalize(embeddings_a, dim=1)
-    embeddings_b = F.normalize(embeddings_b, dim=1)
-
-    logits = torch.matmul(embeddings_a, embeddings_b.T) / temperature
-    labels = torch.arange(len(embeddings_a)).to(embeddings_a.device)
-    loss = F.cross_entropy(logits, labels)
-    return loss
-
-# ----------------------------
-# Multi-Positive InfoNCE
-# ----------------------------
-def multi_positive_info_nce(embeddings, group_ids, temperature=0.07):
-    """
-    embeddings: (batch_size, hidden_dim) - anchor embeddings
-    group_ids: (batch_size,) - 각 샘플이 속한 그룹 ID
-    """
-    embeddings = F.normalize(embeddings, dim=1)
-    batch_size = embeddings.size(0)
-    
-    # similarity matrix
-    sim_matrix = torch.matmul(embeddings, embeddings.T) / temperature
-    
-    # mask: 같은 그룹 = True, 자기 자신 제외
-    group_ids = group_ids.unsqueeze(0)
-    mask = group_ids == group_ids.T
-    mask.fill_diagonal_(False)
-    
-    # log_softmax
-    log_probs = F.log_softmax(sim_matrix, dim=1)
-    
-    # 각 anchor마다 positive 평균 log_prob 계산
-    loss = 0
-    for i in range(batch_size):
-        pos_indices = mask[i].nonzero(as_tuple=True)[0]
-        if len(pos_indices) > 0:
-            loss_i = -log_probs[i, pos_indices].mean()
-            loss += loss_i
-    loss = loss / batch_size
-    return loss
-
-class MultiPositiveInfoNCE(nn.Module):
+class LabelGroupInfoNCE(nn.Module):
     def __init__(self, temperature: float = 0.07, eps: float = 1e-10):
         """
-        Multi-Positive InfoNCE Loss
+        1:1 Label 기반 + Group ID 기반 Multi-Positive InfoNCE Loss
         - features: (batch_size, hidden_dim)
-        - group_ids: (batch_size,) 각 sample이 속한 그룹 ID
+        - labels: (batch_size,) anchor와 대응 텍스트가 일치하는지 0/1
+        - group_ids: (batch_size,) 동일 상품군 그룹 ID (없으면 -1)
         """
         super().__init__()
         self.temperature = temperature
         self.eps = eps
 
-    def forward(self, features: torch.Tensor, group_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, features: torch.Tensor, labels: torch.Tensor, group_ids: torch.Tensor) -> torch.Tensor:
         # L2 정규화
         features = F.normalize(features, dim=-1)
         batch_size = features.size(0)
 
-        # similarity 계산 (batch 내 모든 sample과)
+        # similarity 계산
         sim_matrix = torch.matmul(features, features.T) / self.temperature  # (B, B)
 
-        # Positive mask: 같은 그룹 & 자기 자신 제외
-        group_ids = group_ids.unsqueeze(0)
-        mask = (group_ids == group_ids.T).float()
-        pos_mask = mask - torch.eye(batch_size, device=features.device)  # 자기 자신 제외
-        neg_mask = 1 - mask  # negative mask
+        # ----------------------------
+        # Positive mask 생성
+        # ----------------------------
+        # 1:1 label 기반
+        labels = labels.unsqueeze(1)
+        pos_mask_label = (labels == 1).float()  # 1:1 positive
+        pos_mask_label.fill_diagonal_(0)       # 자기 자신 제외
 
-        # -1000으로 마스킹하여 logsumexp 시 안정화
+        # group_id 기반
+        group_ids = group_ids.unsqueeze(0)
+        pos_mask_group = ((group_ids == group_ids.T) & (group_ids != -1)).float()
+        pos_mask_group.fill_diagonal_(0)       # 자기 자신 제외
+
+        # 최종 positive mask = 1:1 label positive OR group_id positive
+        pos_mask = torch.clamp(pos_mask_label + pos_mask_group, 0, 1)
+        neg_mask = 1 - pos_mask
+
+        # ----------------------------
+        # logsumexp 계산
+        # ----------------------------
         pos_mask_add = neg_mask * (-1000)
         neg_mask_add = pos_mask * (-1000)
 
-        # logsumexp 계산
         pos_exp_sum = (sim_matrix * pos_mask + pos_mask_add).logsumexp(dim=-1)
         all_exp_sum = (sim_matrix * pos_mask + pos_mask_add).logsumexp(dim=-1) + \
                       (sim_matrix * neg_mask + neg_mask_add).logsumexp(dim=-1)
@@ -84,3 +53,21 @@ class MultiPositiveInfoNCE(nn.Module):
         loss_per_example = torch.log((pos_exp_sum + self.eps) / (all_exp_sum + self.eps)).squeeze()
         loss = -loss_per_example.mean()
         return loss
+
+# ----------------------------
+# 사용 예시
+# ----------------------------
+if __name__ == "__main__":
+    batch_size = 6
+    hidden_dim = 128
+
+    # 더미 feature
+    features = torch.randn(batch_size, hidden_dim)
+    # label 1:1 매칭 (0/1)
+    labels = torch.tensor([1,0,1,0,1,0])
+    # group_id (동일 상품군, 없는 경우 -1)
+    group_ids = torch.tensor([0,0,0,1,1,-1])
+
+    loss_fn = LabelGroupInfoNCE()
+    loss = loss_fn(features, labels, group_ids)
+    print("Label+Group Multi-Positive InfoNCE Loss:", loss.item())
